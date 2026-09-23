@@ -1,0 +1,24 @@
+{
+	"download_filings": {
+		"start_year": 2023,
+		"end_year": 2023,
+		"quarters": [1, 2, 3, 4],
+		"filing_types": ["10-K"],
+		"cik_tickers": "../risklens/data/raw/company_ciks.txt",
+		"user_agent": "kojo appeadu (appeaduclement@gmail.com)",
+		"raw_filings_folder": "RAW_FILINGS",
+		"indices_folder": "INDICES",
+		"filings_metadata_file": "FILINGS_METADATA.csv",
+		"skip_present_indices": true
+	},
+	"extract_items": {
+		"raw_filings_folder": "RAW_FILINGS",
+		"extracted_filings_folder": "../../risklens/data/extracted_filings",
+		"filings_metadata_file": "FILINGS_METADATA.csv",
+		"filing_types": ["10-K"],
+		"include_signature": false,
+		"items_to_extract": ["1A"],
+		"remove_tables": true,
+		"skip_extracted_filings": true
+	}
+}
