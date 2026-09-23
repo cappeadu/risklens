@@ -29,9 +29,25 @@ class DataCreator:
     RAW_FILINGS_DIR = ROOT_DIR / "data/extracted_filings/10-K"
     DERIVED_DATA_DIR = ROOT_DIR / "data/raw"
     MANIFEST_FILENAME = "dataset_manifest.json"
+    FILING_TABLE_FILENAME = "filings.csv"
     DATASET_VERSION = "filings-v1"
     PARSER_VERSION = "not-yet-parsed"
     NORMALIZATION_VERSION = "raw-text-only"
+    FILING_METADATA_FIELDS = (
+        "cik",
+        "company",
+        "filing_type",
+        "filing_date",
+        "period_of_report",
+        "sic",
+        "state_of_inc",
+        "state_location",
+        "fiscal_year_end",
+        "filing_html_index",
+        "htm_filing_link",
+        "complete_text_filing_link",
+        "filename",
+    )
     REQUIRED_METADATA_FIELDS = (
         "cik",
         "company",
@@ -286,6 +302,7 @@ class DataCreator:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "record_counts": {
                 "filings": len(records),
+                "filing_table_rows": len(records),
                 "blocks": 0,
                 "sentences": 0,
             },
@@ -306,6 +323,24 @@ class DataCreator:
             json.dump(manifest, file, indent=2)
             file.write("\n")
         return manifest_path
+
+    @classmethod
+    def write_filing_table(cls, records):
+        """Write the normalized filing-level table used by later pipeline stages."""
+        filing_table = pd.DataFrame(
+            [
+                {
+                    field: record.get(field)
+                    for field in cls.FILING_METADATA_FIELDS
+                }
+                for record in records
+            ],
+            columns=cls.FILING_METADATA_FIELDS,
+        )
+        filing_table_path = cls.DERIVED_DATA_DIR / cls.FILING_TABLE_FILENAME
+        filing_table_path.parent.mkdir(parents=True, exist_ok=True)
+        filing_table.to_csv(filing_table_path, index=False)
+        return filing_table_path
 
     @classmethod
     def create_csv_dataset(cls, file_name: str = "sec_10k"):
@@ -347,6 +382,8 @@ class DataCreator:
             "data_size (rows)": df.shape[0],
         }
         logger.info(json.dumps(df_metadata, indent=2))
+        filing_table_path = cls.write_filing_table(records)
+        logger.info(f"Normalized filing table written: {filing_table_path}")
         manifest_path = cls.write_dataset_manifest(records, validation_issues)
         logger.info(f"Dataset manifest written: {manifest_path}")
         return df
