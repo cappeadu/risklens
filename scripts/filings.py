@@ -1,5 +1,7 @@
+import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -26,6 +28,10 @@ class DataCreator:
 
     RAW_FILINGS_DIR = ROOT_DIR / "data/extracted_filings/10-K"
     DERIVED_DATA_DIR = ROOT_DIR / "data/raw"
+    MANIFEST_FILENAME = "dataset_manifest.json"
+    DATASET_VERSION = "filings-v1"
+    PARSER_VERSION = "not-yet-parsed"
+    NORMALIZATION_VERSION = "raw-text-only"
     REQUIRED_METADATA_FIELDS = (
         "cik",
         "company",
@@ -209,9 +215,9 @@ class DataCreator:
                         "message": "SEC URL archive CIK differs from source filename CIK",
                     }
                 )
-            if cls._normalized_accession(archive_match.group("accession")) != cls._normalized_accession(
-                source_parts.group("accession")
-            ):
+            if cls._normalized_accession(
+                archive_match.group("accession")
+            ) != cls._normalized_accession(source_parts.group("accession")):
                 issues.append(
                     {
                         "severity": "warning",
@@ -254,6 +260,53 @@ class DataCreator:
             raise ValueError(json.dumps(issues, indent=2))
         return issues
 
+    @staticmethod
+    def _sha256_file(file_path: Path):
+        """Return the SHA-256 digest for a source file."""
+        digest = hashlib.sha256()
+        with file_path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @classmethod
+    def write_dataset_manifest(cls, records, validation_issues):
+        """Write a manifest describing the current derived filing dataset."""
+        source_paths = cls._raw_filing_paths()
+        manifest = {
+            "dataset_version": cls.DATASET_VERSION,
+            "source_glob": "data/extracted_filings/10-K/*.json",
+            "source_file_count": len(source_paths),
+            "source_hashes": {
+                file_path.name: cls._sha256_file(file_path)
+                for file_path in source_paths
+            },
+            "parser_version": cls.PARSER_VERSION,
+            "normalization_version": cls.NORMALIZATION_VERSION,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "record_counts": {
+                "filings": len(records),
+                "blocks": 0,
+                "sentences": 0,
+            },
+            "validation": {
+                "issue_count": len(validation_issues),
+                "errors": sum(
+                    issue["severity"] == "error" for issue in validation_issues
+                ),
+                "warnings": sum(
+                    issue["severity"] == "warning" for issue in validation_issues
+                ),
+            },
+        }
+
+        manifest_path = cls.DERIVED_DATA_DIR / cls.MANIFEST_FILENAME
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("w", encoding="utf-8") as file:
+            json.dump(manifest, file, indent=2)
+            file.write("\n")
+        return manifest_path
+
     @classmethod
     def create_csv_dataset(cls, file_name: str = "sec_10k"):
         """Create CSV dataset for filings. Searches for filings in .json and creates a CSV.
@@ -283,7 +336,8 @@ class DataCreator:
                 )
             )
 
-        df = pd.DataFrame(cls.load_raw_filings())
+        records = cls.load_raw_filings()
+        df = pd.DataFrame(records)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_path, index=False)
@@ -293,6 +347,8 @@ class DataCreator:
             "data_size (rows)": df.shape[0],
         }
         logger.info(json.dumps(df_metadata, indent=2))
+        manifest_path = cls.write_dataset_manifest(records, validation_issues)
+        logger.info(f"Dataset manifest written: {manifest_path}")
         return df
 
 
