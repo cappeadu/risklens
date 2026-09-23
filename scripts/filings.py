@@ -6,7 +6,14 @@ from configs.config import ROOT_DIR, logger
 
 
 class DataCreator:
-    """Downloads company CIK's as well as creating .csv dataset for filings."""
+    """Download company CIKs and create derived filing datasets.
+
+    Raw extracted filings are read-only inputs. This class never writes to the
+    raw filings directory; derived outputs are written separately.
+    """
+
+    RAW_FILINGS_DIR = ROOT_DIR / "data/extracted_filings/10-K"
+    DERIVED_DATA_DIR = ROOT_DIR / "data/raw"
 
     def __init__(self):
         self.sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -41,21 +48,40 @@ class DataCreator:
         logger.info(json.dumps(metadata_ciks, indent=2))
         return ciks_str
 
-    @staticmethod
-    def create_csv_dataset(file_name: str = "sec_10k"):
+    @classmethod
+    def load_raw_filings(cls):
+        """Load extracted filing JSON records without modifying source files.
+
+        Returns:
+            list[dict]: Filing records read from the raw extracted-filings
+                directory in deterministic filename order.
+
+        Raises:
+            FileNotFoundError: If the raw filings directory does not exist.
+        """
+        if not cls.RAW_FILINGS_DIR.is_dir():
+            raise FileNotFoundError(
+                f"Raw filings directory does not exist: {cls.RAW_FILINGS_DIR}"
+            )
+
+        records = []
+        for file_path in sorted(cls.RAW_FILINGS_DIR.glob("*.json")):
+            with file_path.open(encoding="utf-8") as file:
+                records.append(json.load(file))
+        return records
+
+    @classmethod
+    def create_csv_dataset(cls, file_name: str = "sec_10k"):
         """Create CSV dataset for filings. Searches for filings in .json and creates a CSV.
 
         Args:
             file_name (str, optional): File name for CSV. Defaults to "sec_10k".
         """
-        filings_path = ROOT_DIR / "data/extracted_filings/10-K"
-        output_path = ROOT_DIR / f"data/raw/{file_name}.csv"
+        output_path = cls.DERIVED_DATA_DIR / f"{file_name}.csv"
+        if output_path.resolve().is_relative_to(cls.RAW_FILINGS_DIR.resolve()):
+            raise ValueError("Derived output cannot be written inside raw filings")
 
-        data = []
-        for file_path in filings_path.glob("*.json"):
-            with open(file_path, encoding="utf-8") as f:
-                data.append(json.load(f))
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(cls.load_raw_filings())
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_path, index=False)
