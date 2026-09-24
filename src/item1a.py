@@ -2,12 +2,64 @@
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from configs.config import ROOT_DIR
 
 RAW_FILINGS_DIR = ROOT_DIR / "data/extracted_filings/10-K"
 DEFAULT_OUTPUT_PATH = ROOT_DIR / "data/raw/filing_records.jsonl"
+ITEM_1A_HEADING_PATTERN = re.compile(
+    r"^ITEM\s*1A\.?\s*RISK\s+FACTORS\s*$", re.IGNORECASE
+)
+
+
+def _display_heading(line: str) -> str:
+    """Collapse formatting whitespace for a heading label."""
+    return re.sub(r"\s+", " ", line.strip())
+
+
+def _heading_level(line: str) -> int | None:
+    """Return a conservative heading level for one normalized text line."""
+    heading = _display_heading(line)
+    if not heading:
+        return None
+    if ITEM_1A_HEADING_PATTERN.fullmatch(heading):
+        return 1
+
+    has_letters = any(character.isalpha() for character in heading)
+    is_uppercase = heading == heading.upper()
+    has_terminal_punctuation = heading[-1] in ".!?;:"
+    if has_letters and is_uppercase and not has_terminal_punctuation and len(heading) <= 120:
+        return 2
+    return None
+
+
+def detect_headings(text: str) -> list[dict]:
+    """Detect Item 1A and conservative section headings in normalized text."""
+    headings = []
+    heading_path = []
+    for line_number, line in enumerate(text.splitlines()):
+        level = _heading_level(line)
+        if level is None:
+            continue
+
+        heading = _display_heading(line)
+        if level == 1:
+            heading_path = [heading]
+        else:
+            heading_path = heading_path[:1] + [heading] if heading_path else [heading]
+
+        headings.append(
+            {
+                "line_number": line_number,
+                "heading": heading,
+                "heading_level": level,
+                "heading_path": heading_path.copy(),
+                "block_type": "heading",
+            }
+        )
+    return headings
 
 
 def _filing_id(raw_record: dict) -> str:
@@ -44,6 +96,7 @@ def build_filing_record(raw_record: dict) -> dict:
         "raw_text": item_1a_text,
         "text": normalized_text,
         "normalization_status": "line_endings_only",
+        "headings": detect_headings(normalized_text),
     }
 
 
