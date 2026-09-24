@@ -90,6 +90,12 @@ def _clean_list_text(line: str) -> str:
 
 def _is_abbreviation_period(text: str, index: int) -> bool:
     """Return whether a period belongs to a common abbreviation."""
+    if (
+        index + 2 < len(text)
+        and text[index + 1].isalpha()
+        and text[index + 2] == "."
+    ):
+        return True
     prefix = text[: index + 1]
     if re.search(r"\b(?:[A-Za-z]\.){2,}$", prefix):
         return True
@@ -120,13 +126,22 @@ def segment_sentences(text: str) -> list[dict]:
         if not _is_sentence_boundary(text, index):
             continue
 
-        sentence_text = text[sentence_start : index + 1].strip()
+        segment_start = sentence_start
+        segment_end = index + 1
+        segment = text[segment_start:segment_end]
+        leading = len(segment) - len(segment.lstrip())
+        trailing = len(segment) - len(segment.rstrip())
+        raw_start = segment_start + leading
+        raw_end = segment_end - trailing
+        sentence_text = text[raw_start:raw_end]
         if sentence_text:
             sentences.append(
                 {
                     "sentence_order": len(sentences),
-                    "raw_text": sentence_text,
+                    "raw_text": text[raw_start:raw_end],
                     "text": sentence_text,
+                    "_start_offset": raw_start,
+                    "_end_offset": raw_end,
                 }
             )
         sentence_start = index + 1
@@ -136,16 +151,62 @@ def segment_sentences(text: str) -> list[dict]:
         sentences.append(
             {
                 "sentence_order": len(sentences),
-                "raw_text": remainder,
+                "raw_text": text[sentence_start:].strip(),
                 "text": remainder,
+                "_start_offset": sentence_start + len(text[sentence_start:]) - len(text[sentence_start:].lstrip()),
+                "_end_offset": len(text),
             }
         )
     return sentences
 
 
-def split_blocks(text: str) -> list[dict]:
-    """Split normalized Item 1A text into headings, paragraphs, and lists."""
-    lines = text.splitlines()
+def _raw_offset_map(raw_text: str, normalized_text: str) -> list[int]:
+    """Map every normalized-text offset to its raw-text offset."""
+    offsets = [0]
+    raw_index = 0
+    for character in normalized_text:
+        if raw_text.startswith("\r\n", raw_index):
+            raw_index += 2
+        elif raw_text.startswith("\r", raw_index):
+            raw_index += 1
+        else:
+            raw_index += 1
+        offsets.append(raw_index)
+    return offsets
+
+
+def _boundary_diagnostics(text: str, offset_map: list[int]) -> list[dict]:
+    """Find likely sentence boundaries that lack whitespace."""
+    diagnostics = []
+    for index, character in enumerate(text[:-1]):
+        if character not in ".!?" or text[index + 1].isspace():
+            continue
+        if character == "." and _is_abbreviation_period(text, index):
+            continue
+        if text[index + 1].isupper():
+            diagnostics.append(
+                {
+                    "type": "possible_sentence_boundary_without_whitespace",
+                    "start_offset": offset_map[index],
+                    "end_offset": offset_map[index + 1],
+                    "message": "Punctuation is followed immediately by an uppercase character",
+                }
+            )
+    return diagnostics
+
+
+def split_blocks(text: str, raw_text: str | None = None) -> tuple[list[dict], list[dict]]:
+    """Split normalized Item 1A text into blocks and parser diagnostics."""
+    raw_text = text if raw_text is None else raw_text
+    offset_map = _raw_offset_map(raw_text, text)
+    line_records = []
+    offset = 0
+    for line_with_ending in text.splitlines(keepends=True):
+        line = line_with_ending[:-1] if line_with_ending.endswith("\n") else line_with_ending
+        line_records.append((line, offset, offset + len(line)))
+        offset += len(line_with_ending)
+
+    lines = [record[0] for record in line_records]
     headings = {item["line_number"]: item for item in detect_headings(text)}
     blocks = []
     current = None
@@ -153,11 +214,19 @@ def split_blocks(text: str) -> list[dict]:
 
     def flush_current():
         if current is not None:
-            current["raw_block_text"] = "\n".join(current.pop("raw_lines"))
+            start_offset = current.pop("_start_offset")
+            end_offset = current.pop("_end_offset")
+            current["raw_block_text"] = raw_text[
+                offset_map[start_offset] : offset_map[end_offset]
+            ]
             current["text"] = "\n".join(current.pop("text_lines"))
+            current["_normalized_start_offset"] = start_offset
+            current["_normalized_end_offset"] = end_offset
+            current["start_offset"] = offset_map[start_offset]
+            current["end_offset"] = offset_map[end_offset]
             blocks.append(current.copy())
 
-    for line_number, line in enumerate(lines):
+    for line_number, (line, line_start, line_end) in enumerate(line_records):
         stripped = line.strip()
         heading = headings.get(line_number)
         marker = _list_marker(line)
@@ -179,7 +248,11 @@ def split_blocks(text: str) -> list[dict]:
                     "heading_path": heading_path.copy(),
                     "start_line": line_number,
                     "end_line": line_number,
-                    "raw_block_text": line,
+                    "_normalized_start_offset": line_start,
+                    "_normalized_end_offset": line_end,
+                    "start_offset": offset_map[line_start],
+                    "end_offset": offset_map[line_end],
+                    "raw_block_text": raw_text[offset_map[line_start] : offset_map[line_end]],
                     "text": heading["heading"],
                     "is_bullet": False,
                     "is_list_item": False,
@@ -196,6 +269,8 @@ def split_blocks(text: str) -> list[dict]:
                 "heading_path": heading_path.copy(),
                 "start_line": line_number,
                 "end_line": line_number,
+                "_start_offset": line_start,
+                "_end_offset": line_end,
                 "raw_lines": [line],
                 "text_lines": [_clean_list_text(line)],
                 "is_bullet": True,
@@ -207,12 +282,14 @@ def split_blocks(text: str) -> list[dict]:
             current["raw_lines"].append(line)
             current["text_lines"].append(stripped)
             current["end_line"] = line_number
+            current["_end_offset"] = line_end
             continue
 
         if current is not None:
             current["raw_lines"].append(line)
             current["text_lines"].append(stripped)
             current["end_line"] = line_number
+            current["_end_offset"] = line_end
             continue
 
         next_nonempty = next(
@@ -231,6 +308,8 @@ def split_blocks(text: str) -> list[dict]:
             "heading_path": heading_path.copy(),
             "start_line": line_number,
             "end_line": line_number,
+            "_start_offset": line_start,
+            "_end_offset": line_end,
             "raw_lines": [line],
             "text_lines": [stripped],
             "is_bullet": False,
@@ -238,14 +317,35 @@ def split_blocks(text: str) -> list[dict]:
         }
 
     flush_current()
+    diagnostics = _boundary_diagnostics(text, offset_map)
     for block_order, block in enumerate(blocks):
         block["block_order"] = block_order
-        block["sentences"] = (
-            []
-            if block["block_type"] == "heading"
-            else segment_sentences(block["text"])
-        )
-    return blocks
+        if block["block_type"] == "heading":
+            block["sentences"] = []
+            continue
+
+        normalized_start_offset = block.pop("_normalized_start_offset")
+        normalized_end_offset = block.pop("_normalized_end_offset")
+        normalized_block = text[normalized_start_offset:normalized_end_offset]
+        sentences = []
+        for sentence in segment_sentences(normalized_block):
+            start = sentence.pop("_start_offset")
+            end = sentence.pop("_end_offset")
+            normalized_start = normalized_start_offset + start
+            normalized_end = normalized_start_offset + end
+            raw_start = offset_map[normalized_start]
+            raw_end = offset_map[normalized_end]
+            sentence["start_offset"] = raw_start
+            sentence["end_offset"] = raw_end
+            sentence["raw_text"] = raw_text[raw_start:raw_end]
+            sentence["boundary_uncertain"] = any(
+                diagnostic["start_offset"] >= raw_start
+                and diagnostic["start_offset"] < raw_end
+                for diagnostic in diagnostics
+            )
+            sentences.append(sentence)
+        block["sentences"] = sentences
+    return blocks, diagnostics
 
 
 def _filing_id(raw_record: dict) -> str:
@@ -272,6 +372,7 @@ def build_filing_record(raw_record: dict) -> dict:
         raise ValueError("Filing record has no non-empty item_1A text")
 
     normalized_text = normalize_line_endings(item_1a_text)
+    blocks, diagnostics = split_blocks(normalized_text, item_1a_text)
     metadata = {
         key: value for key, value in raw_record.items() if key != "item_1A"
     }
@@ -283,7 +384,8 @@ def build_filing_record(raw_record: dict) -> dict:
         "text": normalized_text,
         "normalization_status": "line_endings_only",
         "headings": detect_headings(normalized_text),
-        "blocks": split_blocks(normalized_text),
+        "blocks": blocks,
+        "parser_diagnostics": diagnostics,
     }
 
 
