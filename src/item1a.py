@@ -13,6 +13,20 @@ ITEM_1A_HEADING_PATTERN = re.compile(
     r"^ITEM\s*1A\.?\s*RISK\s+FACTORS\s*$", re.IGNORECASE
 )
 BULLET_PATTERN = re.compile(r"^\s*(?P<marker>[•▪●◦◼‣\-*]|\(?\d+[.)])\s+")
+WORD_ABBREVIATIONS = {
+    "approx",
+    "dr",
+    "etc",
+    "fig",
+    "inc",
+    "mr",
+    "mrs",
+    "ms",
+    "no",
+    "prof",
+    "sec",
+    "vs",
+}
 
 
 def _display_heading(line: str) -> str:
@@ -72,6 +86,61 @@ def _list_marker(line: str) -> str | None:
 def _clean_list_text(line: str) -> str:
     """Remove only the leading list marker from modeling text."""
     return BULLET_PATTERN.sub("", line, count=1).strip()
+
+
+def _is_abbreviation_period(text: str, index: int) -> bool:
+    """Return whether a period belongs to a common abbreviation."""
+    prefix = text[: index + 1]
+    if re.search(r"\b(?:[A-Za-z]\.){2,}$", prefix):
+        return True
+
+    match = re.search(r"\b([A-Za-z]+)\.$", prefix)
+    return bool(match and match.group(1).lower() in WORD_ABBREVIATIONS)
+
+
+def _is_sentence_boundary(text: str, index: int) -> bool:
+    """Identify a sentence boundary without splitting common SEC text."""
+    punctuation = text[index]
+    if punctuation not in ".!?":
+        return False
+    if punctuation == "." and _is_abbreviation_period(text, index):
+        return False
+
+    next_index = index + 1
+    while next_index < len(text) and text[next_index] in "\"'”’)]":
+        next_index += 1
+    return next_index == len(text) or text[next_index].isspace()
+
+
+def segment_sentences(text: str) -> list[dict]:
+    """Segment one block while preserving SEC abbreviations and punctuation."""
+    sentences = []
+    sentence_start = 0
+    for index in range(len(text)):
+        if not _is_sentence_boundary(text, index):
+            continue
+
+        sentence_text = text[sentence_start : index + 1].strip()
+        if sentence_text:
+            sentences.append(
+                {
+                    "sentence_order": len(sentences),
+                    "raw_text": sentence_text,
+                    "text": sentence_text,
+                }
+            )
+        sentence_start = index + 1
+
+    remainder = text[sentence_start:].strip()
+    if remainder:
+        sentences.append(
+            {
+                "sentence_order": len(sentences),
+                "raw_text": remainder,
+                "text": remainder,
+            }
+        )
+    return sentences
 
 
 def split_blocks(text: str) -> list[dict]:
@@ -171,6 +240,11 @@ def split_blocks(text: str) -> list[dict]:
     flush_current()
     for block_order, block in enumerate(blocks):
         block["block_order"] = block_order
+        block["sentences"] = (
+            []
+            if block["block_type"] == "heading"
+            else segment_sentences(block["text"])
+        )
     return blocks
 
 
