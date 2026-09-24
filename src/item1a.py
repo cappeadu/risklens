@@ -1,4 +1,4 @@
-"""Stage 1 extraction of filing-level Item 1A records."""
+"""Phase 1 extraction and line-ending normalization for Item 1A records."""
 
 import hashlib
 import json
@@ -22,12 +22,18 @@ def _filing_id(raw_record: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def normalize_line_endings(text: str) -> str:
+    """Normalize CRLF and CR line endings without changing other characters."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def build_filing_record(raw_record: dict) -> dict:
-    """Build one filing-level record without changing Item 1A text."""
+    """Build one filing-level record with raw and line-normalized text."""
     item_1a_text = raw_record.get("item_1A")
     if not isinstance(item_1a_text, str) or not item_1a_text:
         raise ValueError("Filing record has no non-empty item_1A text")
 
+    normalized_text = normalize_line_endings(item_1a_text)
     metadata = {
         key: value for key, value in raw_record.items() if key != "item_1A"
     }
@@ -35,6 +41,9 @@ def build_filing_record(raw_record: dict) -> dict:
         "filing_id": _filing_id(raw_record),
         **metadata,
         "item_1a_text": item_1a_text,
+        "raw_text": item_1a_text,
+        "text": normalized_text,
+        "normalization_status": "line_endings_only",
     }
 
 
