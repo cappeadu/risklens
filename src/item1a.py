@@ -348,6 +348,54 @@ def split_blocks(text: str, raw_text: str | None = None) -> tuple[list[dict], li
     return blocks, diagnostics
 
 
+def _stable_id(prefix: str, values: dict) -> str:
+    """Create a deterministic ID from canonical record values."""
+    payload = json.dumps(values, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"{prefix}-{digest}"
+
+
+def assign_structured_ids(
+    filing_id: str, blocks: list[dict], diagnostics: list[dict]
+) -> None:
+    """Assign deterministic IDs to blocks, sentences, and diagnostics in place."""
+    for block in blocks:
+        block["filing_id"] = filing_id
+        block["block_id"] = _stable_id(
+            "block",
+            {
+                "filing_id": filing_id,
+                "start_offset": block["start_offset"],
+                "end_offset": block["end_offset"],
+                "block_type": block["block_type"],
+            },
+        )
+        for sentence in block["sentences"]:
+            sentence["filing_id"] = filing_id
+            sentence["block_id"] = block["block_id"]
+            sentence["sentence_id"] = _stable_id(
+                "sentence",
+                {
+                    "block_id": block["block_id"],
+                    "start_offset": sentence["start_offset"],
+                    "end_offset": sentence["end_offset"],
+                    "sentence_order": sentence["sentence_order"],
+                },
+            )
+
+    for diagnostic in diagnostics:
+        diagnostic["filing_id"] = filing_id
+        diagnostic["diagnostic_id"] = _stable_id(
+            "diagnostic",
+            {
+                "filing_id": filing_id,
+                "type": diagnostic["type"],
+                "start_offset": diagnostic["start_offset"],
+                "end_offset": diagnostic["end_offset"],
+            },
+        )
+
+
 def _filing_id(raw_record: dict) -> str:
     """Create a deterministic ID from stable filing metadata."""
     identity = {
@@ -373,11 +421,13 @@ def build_filing_record(raw_record: dict) -> dict:
 
     normalized_text = normalize_line_endings(item_1a_text)
     blocks, diagnostics = split_blocks(normalized_text, item_1a_text)
+    filing_id = _filing_id(raw_record)
+    assign_structured_ids(filing_id, blocks, diagnostics)
     metadata = {
         key: value for key, value in raw_record.items() if key != "item_1A"
     }
     return {
-        "filing_id": _filing_id(raw_record),
+        "filing_id": filing_id,
         **metadata,
         "item_1a_text": item_1a_text,
         "raw_text": item_1a_text,
@@ -405,12 +455,73 @@ def extract_filing_records(source_dir: Path = RAW_FILINGS_DIR) -> list[dict]:
 def write_filing_records(
     output_path: Path = DEFAULT_OUTPUT_PATH,
     source_dir: Path = RAW_FILINGS_DIR,
+    records: list[dict] | None = None,
 ) -> tuple[Path, int]:
     """Write filing-level records as UTF-8 JSON Lines."""
-    records = extract_filing_records(source_dir)
+    records = extract_filing_records(source_dir) if records is None else records
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open("w", encoding="utf-8", newline="\n") as file:
         for record in records:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
     return output_path, len(records)
+
+
+def write_structured_tables(
+    records: list[dict], output_dir: Path = ROOT_DIR / "data/raw"
+) -> dict[str, Path]:
+    """Write block, sentence, and diagnostic tables from extracted records."""
+    import pandas as pd
+
+    block_rows = []
+    sentence_rows = []
+    diagnostic_rows = []
+    for record in records:
+        for block in record["blocks"]:
+            block_rows.append(
+                {
+                    "filing_id": record["filing_id"],
+                    "block_id": block["block_id"],
+                    "block_order": block["block_order"],
+                    "block_type": block["block_type"],
+                    "heading": block["heading"],
+                    "heading_path": json.dumps(block["heading_path"]),
+                    "start_line": block["start_line"],
+                    "end_line": block["end_line"],
+                    "start_offset": block["start_offset"],
+                    "end_offset": block["end_offset"],
+                    "raw_block_text": block["raw_block_text"],
+                    "text": block["text"],
+                    "is_bullet": block["is_bullet"],
+                    "is_list_item": block["is_list_item"],
+                }
+            )
+            for sentence in block["sentences"]:
+                sentence_rows.append(
+                    {
+                        "filing_id": record["filing_id"],
+                        "block_id": block["block_id"],
+                        "sentence_id": sentence["sentence_id"],
+                        "sentence_order": sentence["sentence_order"],
+                        "raw_text": sentence["raw_text"],
+                        "text": sentence["text"],
+                        "start_offset": sentence["start_offset"],
+                        "end_offset": sentence["end_offset"],
+                        "boundary_uncertain": sentence["boundary_uncertain"],
+                    }
+                )
+        for diagnostic in record["parser_diagnostics"]:
+            diagnostic_rows.append(diagnostic)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tables = {
+        "blocks": ("blocks.csv", block_rows),
+        "sentences": ("sentences.csv", sentence_rows),
+        "parser_diagnostics": ("parser_diagnostics.csv", diagnostic_rows),
+    }
+    paths = {}
+    for name, (filename, rows) in tables.items():
+        path = output_dir / filename
+        pd.DataFrame(rows).to_csv(path, index=False)
+        paths[name] = path
+    return paths
