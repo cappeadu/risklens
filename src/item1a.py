@@ -12,6 +12,7 @@ DEFAULT_OUTPUT_PATH = ROOT_DIR / "data/raw/filing_records.jsonl"
 ITEM_1A_HEADING_PATTERN = re.compile(
     r"^ITEM\s*1A\.?\s*RISK\s+FACTORS\s*$", re.IGNORECASE
 )
+BULLET_PATTERN = re.compile(r"^\s*(?P<marker>[•▪●◦◼‣\-*]|\(?\d+[.)])\s+")
 
 
 def _display_heading(line: str) -> str:
@@ -62,6 +63,117 @@ def detect_headings(text: str) -> list[dict]:
     return headings
 
 
+def _list_marker(line: str) -> str | None:
+    """Return a list marker when a line starts with one."""
+    match = BULLET_PATTERN.match(line)
+    return match.group("marker") if match else None
+
+
+def _clean_list_text(line: str) -> str:
+    """Remove only the leading list marker from modeling text."""
+    return BULLET_PATTERN.sub("", line, count=1).strip()
+
+
+def split_blocks(text: str) -> list[dict]:
+    """Split normalized Item 1A text into headings, paragraphs, and lists."""
+    lines = text.splitlines()
+    headings = {item["line_number"]: item for item in detect_headings(text)}
+    blocks = []
+    current = None
+    heading_path = []
+
+    def flush_current():
+        if current is not None:
+            current["raw_block_text"] = "\n".join(current.pop("raw_lines"))
+            current["text"] = "\n".join(current.pop("text_lines"))
+            blocks.append(current.copy())
+
+    for line_number, line in enumerate(lines):
+        stripped = line.strip()
+        heading = headings.get(line_number)
+        marker = _list_marker(line)
+
+        if not stripped:
+            flush_current()
+            current = None
+            continue
+
+        if heading:
+            flush_current()
+            current = None
+            heading_path = heading["heading_path"]
+            blocks.append(
+                {
+                    "block_order": len(blocks),
+                    "block_type": "heading",
+                    "heading": heading["heading"],
+                    "heading_path": heading_path.copy(),
+                    "start_line": line_number,
+                    "end_line": line_number,
+                    "raw_block_text": line,
+                    "text": heading["heading"],
+                    "is_bullet": False,
+                    "is_list_item": False,
+                }
+            )
+            continue
+
+        if marker:
+            flush_current()
+            current = {
+                "block_order": len(blocks),
+                "block_type": "list_item",
+                "heading": heading_path[-1] if heading_path else None,
+                "heading_path": heading_path.copy(),
+                "start_line": line_number,
+                "end_line": line_number,
+                "raw_lines": [line],
+                "text_lines": [_clean_list_text(line)],
+                "is_bullet": True,
+                "is_list_item": True,
+            }
+            continue
+
+        if current is not None and current["is_list_item"]:
+            current["raw_lines"].append(line)
+            current["text_lines"].append(stripped)
+            current["end_line"] = line_number
+            continue
+
+        if current is not None:
+            current["raw_lines"].append(line)
+            current["text_lines"].append(stripped)
+            current["end_line"] = line_number
+            continue
+
+        next_nonempty = next(
+            (candidate.strip() for candidate in lines[line_number + 1 :] if candidate.strip()),
+            None,
+        )
+        block_type = (
+            "bullet_group"
+            if stripped.endswith(":") and next_nonempty and _list_marker(next_nonempty)
+            else "paragraph"
+        )
+        current = {
+            "block_order": len(blocks),
+            "block_type": block_type,
+            "heading": heading_path[-1] if heading_path else None,
+            "heading_path": heading_path.copy(),
+            "start_line": line_number,
+            "end_line": line_number,
+            "raw_lines": [line],
+            "text_lines": [stripped],
+            "is_bullet": False,
+            "is_list_item": False,
+        }
+
+    flush_current()
+    for block_order, block in enumerate(blocks):
+        block["block_order"] = block_order
+    return blocks
+
+
 def _filing_id(raw_record: dict) -> str:
     """Create a deterministic ID from stable filing metadata."""
     identity = {
@@ -97,6 +209,7 @@ def build_filing_record(raw_record: dict) -> dict:
         "text": normalized_text,
         "normalization_status": "line_endings_only",
         "headings": detect_headings(normalized_text),
+        "blocks": split_blocks(normalized_text),
     }
 
 
