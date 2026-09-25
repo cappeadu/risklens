@@ -103,6 +103,15 @@ def render_block_review(record: dict) -> None:
     st.text_area("Raw block text", block.get("raw_block_text", ""), height=220, disabled=True)
     st.text_area("Normalized block text", block.get("text", ""), height=220, disabled=True)
 
+    if block.get("contains_inline_bullets"):
+        st.markdown("#### Inline bullet items")
+        for item in block.get("list_items", []):
+            st.write(
+                "{} — {}".format(
+                    item.get("list_item_id", "no ID"), item.get("text", "")
+                )
+            )
+
     sentences = block.get("sentences") or []
     st.markdown("#### Sentences in this block")
     if not sentences:
@@ -177,7 +186,10 @@ def main() -> None:
         "blocks": len(blocks),
         "sentences": len(sentences),
         "headings": sum(block.get("block_type") == "heading" for block in blocks),
-        "list_items": sum(block.get("is_list_item", False) for block in blocks),
+        "list_items": sum(
+            int(block.get("is_list_item", False)) + len(block.get("list_items", []))
+            for block in blocks
+        ),
         "uncertain_boundaries": sum(sentence.get("boundary_uncertain", False) for sentence in sentences),
         "diagnostics": len(diagnostics),
     }

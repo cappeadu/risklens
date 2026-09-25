@@ -13,6 +13,17 @@ ITEM_1A_HEADING_PATTERN = re.compile(
     r"^ITEM\s*1A\.?\s*RISK\s+FACTORS\s*$", re.IGNORECASE
 )
 BULLET_PATTERN = re.compile(r"^\s*(?P<marker>[•▪●◦◼‣\-*]|\(?\d+[.)])\s+")
+INLINE_BULLET_PATTERN = re.compile(r"(?<!\w)(?P<marker>[•▪●◦◼‣])\s*")
+RISK_HEADING_PATTERN = re.compile(
+    r"\b(risk|risks|subject to|depend|dependent|ability to|failure to|unable to|"
+    r"competition|cybersecurity|supply|regulatory|personnel|third parties|"
+    r"operations|market|customers|laws|litigation|privacy|environmental)\b",
+    re.IGNORECASE,
+)
+HEADING_EXCLUSION_PATTERN = re.compile(
+    r"^(investors should|this report|we caution|important factors that could)",
+    re.IGNORECASE,
+)
 WORD_ABBREVIATIONS = {
     "approx",
     "dr",
@@ -34,36 +45,87 @@ def _display_heading(line: str) -> str:
     return re.sub(r"\s+", " ", line.strip())
 
 
-def _heading_level(line: str) -> int | None:
-    """Return a conservative heading level for one normalized text line."""
+def _heading_decision(line: str, lines: list[str], line_number: int) -> dict | None:
+    """Apply deterministic rules to classify one line as a heading or candidate."""
     heading = _display_heading(line)
     if not heading:
         return None
     if ITEM_1A_HEADING_PATTERN.fullmatch(heading):
-        return 1
+        return {
+            "heading_level": 1,
+            "heading_decision": "HIGH_RULE_MATCH",
+            "heading_reasons": ["matches Item 1A heading pattern"],
+        }
 
     has_letters = any(character.isalpha() for character in heading)
     is_uppercase = heading == heading.upper()
-    has_terminal_punctuation = heading[-1] in ".!?;:"
-    if has_letters and is_uppercase and not has_terminal_punctuation and len(heading) <= 120:
-        return 2
-    return None
+    if has_letters and is_uppercase and len(heading) <= 120:
+        return {
+            "heading_level": 2,
+            "heading_decision": "HIGH_RULE_MATCH",
+            "heading_reasons": ["short uppercase heading"],
+        }
+
+    if _list_marker(heading) or len(heading) < 20 or len(heading) > 180:
+        return None
+    if HEADING_EXCLUSION_PATTERN.search(heading) or heading.endswith(":"):
+        return None
+
+    following = next(
+        (candidate.strip() for candidate in lines[line_number + 1 :] if candidate.strip()),
+        None,
+    )
+    if not following or not RISK_HEADING_PATTERN.search(heading):
+        return None
+
+    reasons = ["contains a configured risk-topic phrase"]
+    if len(following) >= max(80, len(heading)):
+        reasons.append("followed by a longer explanatory line")
+    title_words = [word for word in heading.split() if word[:1].isalpha()]
+    title_like = len(title_words) >= 2 and sum(
+        word[0].isupper() for word in title_words
+    ) >= max(2, len(title_words) // 2)
+    if title_like:
+        reasons.append("title-like capitalization")
+
+    explicit_risk_phrase = re.search(
+        r"\b(our ability to|we depend|we are subject to|failure to|unable to|"
+        r"we face|our business|our operations|our customers)\b",
+        heading,
+        re.IGNORECASE,
+    )
+    if explicit_risk_phrase and len(following) >= max(80, len(heading)):
+        return {
+            "heading_level": 3,
+            "heading_decision": "HIGH_RULE_MATCH",
+            "heading_reasons": reasons,
+        }
+
+    return {
+        "heading_level": 3,
+        "heading_decision": "MEDIUM_RULE_MATCH",
+        "heading_reasons": reasons,
+    }
 
 
 def detect_headings(text: str) -> list[dict]:
     """Detect Item 1A and conservative section headings in normalized text."""
     headings = []
     heading_path = []
-    for line_number, line in enumerate(text.splitlines()):
-        level = _heading_level(line)
-        if level is None:
+    lines = text.splitlines()
+    for line_number, line in enumerate(lines):
+        decision = _heading_decision(line, lines, line_number)
+        if not decision or decision["heading_decision"] != "HIGH_RULE_MATCH":
             continue
 
         heading = _display_heading(line)
+        level = decision["heading_level"]
         if level == 1:
             heading_path = [heading]
-        else:
+        elif level == 2:
             heading_path = heading_path[:1] + [heading] if heading_path else [heading]
+        else:
+            heading_path = heading_path[:2] + [heading] if len(heading_path) >= 2 else heading_path + [heading]
 
         headings.append(
             {
@@ -72,9 +134,35 @@ def detect_headings(text: str) -> list[dict]:
                 "heading_level": level,
                 "heading_path": heading_path.copy(),
                 "block_type": "heading",
+                "heading_decision": decision["heading_decision"],
+                "heading_reasons": decision["heading_reasons"],
             }
         )
     return headings
+
+
+def detect_heading_diagnostics(text: str) -> list[dict]:
+    """Return medium-confidence heading candidates without changing structure."""
+    diagnostics = []
+    lines = text.splitlines()
+    accepted_lines = {item["line_number"] for item in detect_headings(text)}
+    for line_number, line in enumerate(lines):
+        if line_number in accepted_lines:
+            continue
+        decision = _heading_decision(line, lines, line_number)
+        if not decision:
+            continue
+        diagnostics.append(
+            {
+                "type": "heading_candidate",
+                "line_number": line_number,
+                "heading": _display_heading(line),
+                "heading_decision": decision["heading_decision"],
+                "heading_reasons": decision["heading_reasons"],
+                "message": "Candidate retained for review and not used as a block boundary",
+            }
+        )
+    return diagnostics
 
 
 def _list_marker(line: str) -> str | None:
@@ -86,6 +174,31 @@ def _list_marker(line: str) -> str | None:
 def _clean_list_text(line: str) -> str:
     """Remove only the leading list marker from modeling text."""
     return BULLET_PATTERN.sub("", line, count=1).strip()
+
+
+def _extract_inline_list_items(text: str) -> list[dict]:
+    """Extract multiple inline bullets while preserving the parent text."""
+    matches = list(INLINE_BULLET_PATTERN.finditer(text))
+    if len(matches) < 2:
+        return []
+
+    items = []
+    for item_order, match in enumerate(matches):
+        start = match.end()
+        end = matches[item_order + 1].start() if item_order + 1 < len(matches) else len(text)
+        item_text = text[start:end].strip().strip(";,")
+        item_text = re.sub(r"\s+(?:and|or)\s*$", "", item_text, flags=re.IGNORECASE)
+        if item_text:
+            items.append(
+                {
+                    "item_order": item_order,
+                    "marker": match.group("marker"),
+                    "text": item_text,
+                    "raw_text": text[match.start() : end],
+                    "is_bullet": True,
+                }
+            )
+    return items
 
 
 def _is_abbreviation_period(text: str, index: int) -> bool:
@@ -318,10 +431,20 @@ def split_blocks(text: str, raw_text: str | None = None) -> tuple[list[dict], li
 
     flush_current()
     diagnostics = _boundary_diagnostics(text, offset_map)
+    for diagnostic in detect_heading_diagnostics(text):
+        line_number = diagnostic["line_number"]
+        if line_number < len(line_records):
+            _, line_start, line_end = line_records[line_number]
+            diagnostic["start_offset"] = offset_map[line_start]
+            diagnostic["end_offset"] = offset_map[line_end]
+        diagnostics.append(diagnostic)
+
     for block_order, block in enumerate(blocks):
         block["block_order"] = block_order
         if block["block_type"] == "heading":
             block["sentences"] = []
+            block["contains_inline_bullets"] = False
+            block["list_items"] = []
             continue
 
         normalized_start_offset = block.pop("_normalized_start_offset")
@@ -344,6 +467,11 @@ def split_blocks(text: str, raw_text: str | None = None) -> tuple[list[dict], li
                 for diagnostic in diagnostics
             )
             sentences.append(sentence)
+        inline_items = _extract_inline_list_items(block["text"])
+        if inline_items and block["block_type"] == "paragraph":
+            block["block_type"] = "inline_bullet_group"
+        block["contains_inline_bullets"] = bool(inline_items)
+        block["list_items"] = inline_items
         block["sentences"] = sentences
     return blocks, diagnostics
 
@@ -380,6 +508,15 @@ def assign_structured_ids(
                     "start_offset": sentence["start_offset"],
                     "end_offset": sentence["end_offset"],
                     "sentence_order": sentence["sentence_order"],
+                },
+            )
+        for item in block.get("list_items", []):
+            item["list_item_id"] = _stable_id(
+                "list-item",
+                {
+                    "block_id": block["block_id"],
+                    "item_order": item["item_order"],
+                    "text": item["text"],
                 },
             )
 
@@ -494,6 +631,8 @@ def write_structured_tables(
                     "text": block["text"],
                     "is_bullet": block["is_bullet"],
                     "is_list_item": block["is_list_item"],
+                    "contains_inline_bullets": block["contains_inline_bullets"],
+                    "list_items": json.dumps(block.get("list_items", []), ensure_ascii=False),
                 }
             )
             for sentence in block["sentences"]:
