@@ -303,6 +303,29 @@ Representative analyst queries return relevant, traceable source sentences with 
 **Feature branch:** Yes — `feature/hybrid-retrieval`  
 **Suggested commit:** `feat: add validated hybrid risk evidence retrieval`
 
+## Heading context for later modeling
+
+Headings should be preserved as structured context and model features, not treated as labels themselves.
+
+- Retain original and normalized heading text.
+- Propagate the complete `heading_path` to every block and sentence.
+- Preserve deterministic metadata such as `heading_level`, `heading_type`, `heading_decision`, `heading_reasons`, and `is_heading_candidate`.
+- Provide heading context to later models alongside sentence text, for example:
+
+  ```text
+  [SECTION] CYBERSECURITY RISKS
+  [HEADING] Our systems may be vulnerable to cyberattacks.
+  [SENTENCE] We maintain monitoring and incident-response procedures.
+  ```
+
+- Do not automatically label every sentence under a risk heading as `RISK_STATEMENT`; each sentence must receive its own classification.
+- Keep headings as separate structural records. Only surface a heading as analyst evidence when it contains meaningful standalone information.
+- Retain uncertain heading candidates as metadata and diagnostics rather than using them as ground-truth labels.
+- Compare later models with and without heading features to measure their value.
+- Use company-held-out evaluation so models do not simply memorize issuer-specific heading wording.
+
+The purpose is to give models useful section context while preserving sentence-level classification integrity.
+
 ## Cross-phase rules
 
 - Do not randomly split sentences when company-specific wording can leak.
