@@ -137,7 +137,7 @@ This Annual Report contains forward-looking statements that involve risks and un
 
 Do not assign `BOILERPLATE` merely because a sentence uses formal legal language. If it contains a meaningful company-specific risk or mitigation, label the meaningful signal and record the rationale.
 
-`BOILERPLATE` will normally stand alone. Multi-label decisions are defined in the next annotation stage.
+`BOILERPLATE` will normally stand alone. If a sentence contains meaningful company-specific risk or mitigation content, assign the meaningful label or labels and record why the sentence is not treated as only boilerplate.
 
 ## `NONE_OTHER`
 
@@ -153,6 +153,77 @@ Use `NONE_OTHER` when the sentence is, for example:
 - factual text that does not materially support interpretation of a risk or mitigation.
 
 Annotators should record a short rationale for unusual or ambiguous `NONE_OTHER` decisions.
+
+## Multi-label and `NONE_OTHER` rules
+
+### Independent labels
+
+The four target labels are independently applicable. Do not force a sentence into one mutually exclusive class when it clearly contains more than one signal.
+
+Valid target-label combinations include:
+
+- `RISK_STATEMENT` only;
+- `MITIGATION` only;
+- `SUPPORTED_CONTEXT` only;
+- `BOILERPLATE` only;
+- `RISK_STATEMENT` + `MITIGATION`;
+- `RISK_STATEMENT` + `SUPPORTED_CONTEXT`;
+- `MITIGATION` + `SUPPORTED_CONTEXT`;
+- `RISK_STATEMENT` + `MITIGATION` + `SUPPORTED_CONTEXT`.
+
+The labels should describe the sentence's explicit content. A heading, neighboring sentence, or analyst interpretation may provide context, but must not create a label that is absent from the sentence.
+
+### Mixed risk and mitigation
+
+Assign both labels when the same sentence explicitly identifies a possible adverse consequence and an action intended to prevent, reduce, monitor, or respond to it.
+
+```text
+Our dependence on third-party suppliers could result in delays, although we seek alternative sources where practical.
+```
+
+Labels:
+
+```json
+["RISK_STATEMENT", "MITIGATION"]
+```
+
+Do not choose one label based on which clause appears first. If the sentence contains separate signals, preserve both signals.
+
+### Context combined with a target signal
+
+Add `SUPPORTED_CONTEXT` when the sentence also provides factual or operational context that supports the risk or mitigation signal.
+
+```text
+We operate data centers in several regions, which helps us maintain service during a localized outage.
+```
+
+Possible labels:
+
+```json
+["MITIGATION", "SUPPORTED_CONTEXT"]
+```
+
+The context label should not be added merely because every risk or mitigation has surrounding facts. Add it when the sentence itself contains meaningful supporting context.
+
+### Boilerplate precedence
+
+`BOILERPLATE` normally stands alone because its purpose is to identify low-value standardized language. Do not combine it with another label solely because the sentence contains generic words such as “risk” or “uncertainty.”
+
+If a sentence contains both formulaic language and a specific company-related risk or mitigation, assign the meaningful target label or labels instead of using `BOILERPLATE` as a catch-all.
+
+### `NONE_OTHER`
+
+Set `none_other` to `true` only when none of the four target labels applies. In that case, the target `labels` array must be empty:
+
+```json
+{
+  "labels": [],
+  "none_other": true,
+  "rationale": "The sentence is a neutral transition and contains no target signal."
+}
+```
+
+`NONE_OTHER` must not be combined with any target label. If at least one target label applies, set `none_other` to `false`.
 
 ## Boundary guidance
 
@@ -190,7 +261,7 @@ This is `MITIGATION`.
 Our dependence on third-party suppliers could result in delays, although we seek alternative sources where practical.
 ```
 
-This contains both a possible adverse consequence and an action intended to reduce that exposure. It should be reviewed for both `RISK_STATEMENT` and `MITIGATION` under the multi-label rules for the next stage.
+This contains both a possible adverse consequence and an action intended to reduce that exposure. Assign both `RISK_STATEMENT` and `MITIGATION`.
 
 ### Heading context
 
@@ -224,6 +295,8 @@ Each annotation should preserve the following information where available:
 
 The sentence text, original and normalized forms, heading path, block type, and parser diagnostics should remain available through the linked Phase 1 records rather than being copied inconsistently into annotation files.
 
+For a multi-label record, include every applicable target label in the `labels` array. For a `NONE_OTHER` record, use an empty `labels` array and set `none_other` to `true`.
+
 ## Versioning and change control
 
 - This document is version `v1`.
@@ -243,3 +316,14 @@ Stage 1 is complete when:
 - heading context is explicitly separated from sentence labels;
 - annotation provenance and versioning requirements are recorded.
 
+## Stage 2 completion criteria
+
+Stage 2 is complete when:
+
+- labels are treated as independent rather than mutually exclusive;
+- valid mixed-label combinations are documented;
+- risk-and-mitigation sentences have an explicit dual-label rule;
+- `BOILERPLATE` precedence is documented;
+- `NONE_OTHER` is mutually exclusive with target labels;
+- annotation records represent empty, single-label, and multi-label cases consistently;
+- headings and neighboring context cannot create labels absent from the sentence.
